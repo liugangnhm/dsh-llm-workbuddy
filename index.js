@@ -54,6 +54,14 @@ let nextTraceId = 0;
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 const THINKING_LEVELS = ["off", ...EFFORTS];
+/**
+ * Complete thinking-level map used when a provider opts into
+ * `fullThinkingLevels` and neither the remote catalog nor the local
+ * configuration declares per-model levels. `off` stays `null` so selecting
+ * it omits the reasoning parameter entirely, matching pi-ai's "supported,
+ * send nothing" reading.
+ */
+const FULL_THINKING_LEVEL_MAP = Object.freeze({ off: null, minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
 const COMPAT = {
   supportsStore: false,
   supportsDeveloperRole: false,
@@ -167,14 +175,18 @@ function workBuddyModel({ provider = PROVIDER, id, name: modelName, contextWindo
   };
 }
 
-function remoteReasoning(raw, fallback) {
+function remoteReasoning(raw, fallback, expandLevels = false) {
   const reasoning = raw.supportsReasoning ?? fallback?.reasoning ?? raw.onlyReasoning === true;
   if (!reasoning) return { reasoning: false };
   const declared = raw.thinkingLevelMap && typeof raw.thinkingLevelMap === "object" ? raw.thinkingLevelMap : undefined;
+  // A remote declaration always wins verbatim: the server knows the model,
+  // and unlisted levels must not be invented behind its back.
   const thinkingLevelMap = declared
     ? Object.fromEntries(THINKING_LEVELS.map((level) => [level,
         Object.hasOwn(declared, level) && (typeof declared[level] === "string" || declared[level] === null) ? declared[level] : null]))
-    : { ...(fallback?.thinkingLevelMap ?? {}), ...(raw.onlyReasoning === true ? { off: null } : {}) };
+    : expandLevels
+      ? { ...FULL_THINKING_LEVEL_MAP }
+      : { ...(fallback?.thinkingLevelMap ?? {}), ...(raw.onlyReasoning === true ? { off: null } : {}) };
   const effort = raw.reasoning?.effort;
   const defaultReasoningEffort = EFFORTS.includes(effort) && thinkingLevelMap[effort] !== null ? effort : undefined;
   return {
@@ -185,20 +197,39 @@ function remoteReasoning(raw, fallback) {
   };
 }
 
-function configuredReasoning(entry, base) {
+function configuredReasoning(entry, base, expandLevels = false) {
   if (entry.reasoningEfforts === false) return { reasoning: false };
   if (!entry.reasoningEfforts || typeof entry.reasoningEfforts !== "object") {
-    return base ? {
+    if (!base) {
+      return expandLevels
+        ? { reasoning: true, thinkingLevelMap: { ...FULL_THINKING_LEVEL_MAP } }
+        : { reasoning: false };
+    }
+    // Fill only the levels the base map leaves undecided. Maps the remote
+    // catalog declared are normalized to every level upstream, so a declared
+    // "unsupported" level is never re-enabled here; a bare fallback map
+    // ({ off: null }) is the one that gets expanded.
+    const thinkingLevelMap = expandLevels
+      ? Object.fromEntries(THINKING_LEVELS.map((level) => [level,
+          Object.hasOwn(base.thinkingLevelMap ?? {}, level) ? base.thinkingLevelMap[level] : FULL_THINKING_LEVEL_MAP[level]]))
+      : base.thinkingLevelMap;
+    return {
       reasoning: base.reasoning,
-      thinkingLevelMap: base.thinkingLevelMap,
+      thinkingLevelMap,
       defaultReasoningEffort: base.defaultReasoningEffort,
       thinkingFormat: base.compat?.thinkingFormat,
-    } : { reasoning: false };
+    };
   }
   const map = {};
   for (const level of THINKING_LEVELS) {
     if (!Object.hasOwn(entry.reasoningEfforts, level)) map[level] = null;
     else if (!(level === "off" && entry.reasoningEfforts[level] === null)) map[level] = entry.reasoningEfforts[level];
+  }
+  // An explicitly declared entry replaces the base map wholesale; expand only
+  // when the declaration names no level at all beyond `off`, so a partial
+  // per-model override never invents levels the author did not list.
+  if (expandLevels && !THINKING_LEVELS.some((level) => level !== "off" && Object.hasOwn(entry.reasoningEfforts, level))) {
+    return { reasoning: true, thinkingLevelMap: { ...FULL_THINKING_LEVEL_MAP }, thinkingFormat: entry.compat?.thinkingFormat };
   }
   return { reasoning: true, thinkingLevelMap: map, thinkingFormat: entry.compat?.thinkingFormat };
 }
@@ -211,7 +242,7 @@ function text(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0);
 }
 
-function modelsFromConfig(data) {
+function modelsFromConfig(data, expandLevels = false) {
   const agents = Array.isArray(data?.agents) ? data.agents : data?.agent?.agents;
   const cli = Array.isArray(agents) ? agents.find((agent) => agent?.name === "cli") : undefined;
   const allowed = Array.isArray(cli?.models) ? cli.models : [];
@@ -230,7 +261,7 @@ function modelsFromConfig(data) {
       contextWindow,
       maxTokens,
       images: raw.supportsImages === true || fallback?.input.includes("image") === true,
-      ...remoteReasoning(raw, fallback),
+      ...remoteReasoning(raw, fallback, expandLevels),
     })];
   });
 }
@@ -240,7 +271,7 @@ function authenticationHeaders(credential) {
   return credential.kind === "bearer" ? { authorization: `Bearer ${value}` } : { "x-api-key": value };
 }
 
-async function fetchWorkBuddyModels(credential, signal) {
+async function fetchWorkBuddyModels(credential, signal, expandLevels = false) {
   let response;
   try {
     response = await fetch(CONFIG_URL, {
@@ -259,7 +290,7 @@ async function fetchWorkBuddyModels(credential, signal) {
   if (!response.ok) throw new LlmError(`WorkBuddy 模型配置接口返回 ${response.status}`, "DISCOVERY_FAILED");
   const body = await response.json();
   if (body?.code !== 0) throw new LlmError(`WorkBuddy 模型配置接口错误：${body?.msg ?? body?.code}`, "DISCOVERY_FAILED");
-  const models = modelsFromConfig(body.data);
+  const models = modelsFromConfig(body.data, expandLevels);
   if (models.length === 0) throw new LlmError("WorkBuddy 没有返回 CLI 可用模型", "DISCOVERY_FAILED");
   return models;
 }
@@ -393,12 +424,12 @@ function selectBuiltinModels(base, entries) {
   return { ...base, getModels: () => selected };
 }
 
-function selectWorkBuddyModels(base, entries) {
+function selectWorkBuddyModels(base, entries, expandLevels = false) {
   if (!Array.isArray(entries) || entries.length === 0) return base;
   const byId = new Map(base.map((model) => [model.id, model]));
   return entries.map((entry) => {
     const model = byId.get(entry.id);
-    const reasoning = configuredReasoning(entry, model);
+    const reasoning = configuredReasoning(entry, model, expandLevels);
     return workBuddyModel({
       id: entry.id,
       name: entry.name ?? model?.name ?? entry.id,
@@ -609,7 +640,12 @@ export function apply(ctx, config) {
       if (!ownsProvider(provider, builtins, source)) continue;
       if (WORKBUDDY_PROVIDERS.has(provider)) {
         const sourceWithAuth = workBuddySource(current(), source);
-        const models = selectWorkBuddyModels(remoteModels ?? FALLBACK_MODELS, source.models);
+        // `fullThinkingLevels` opts every WorkBuddy model of this provider
+        // into the complete pi-ai level set (off…max) when neither the remote
+        // catalog nor a per-model `reasoningEfforts` entry declares levels.
+        // Explicit declarations still win verbatim.
+        const expandLevels = source.fullThinkingLevels === true;
+        const models = selectWorkBuddyModels(remoteModels ?? FALLBACK_MODELS, source.models, expandLevels);
         const configured = new Map((source.models ?? []).flatMap((model) =>
           Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
         ));
@@ -834,7 +870,7 @@ export function apply(ctx, config) {
     let pending = refreshPromises.get(cacheKey);
     if (!pending) {
       pending = (async () => {
-        remoteModels = await fetchWorkBuddyModels(credential, signal);
+        remoteModels = await fetchWorkBuddyModels(credential, signal, profile?.fullThinkingLevels === true);
         remoteModelsKey = cacheKey;
         generation += 1;
       })().finally(() => refreshPromises.delete(cacheKey));
@@ -941,7 +977,7 @@ export function apply(ctx, config) {
       const credential = request.apiKey
         ? { value: request.apiKey, kind: "api-key", ref: API_KEY_ENV }
         : await resolveCredential(request.provider, profile);
-      remoteModels = await fetchWorkBuddyModels(credential, discoverySignal);
+      remoteModels = await fetchWorkBuddyModels(credential, discoverySignal, profile?.fullThinkingLevels === true);
       remoteModelsKey = credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? API_KEY_ENV}`;
       generation += 1;
       return remoteModels.map((model) => ({

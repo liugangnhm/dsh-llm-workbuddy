@@ -647,6 +647,70 @@ test("自定义模型可覆盖自己的思考档位", () => {
   assert.equal(model.thinkingLevelMap.high, null);
 });
 
+test("fullThinkingLevels 展开远端未声明档位的模型", () => {
+  const models = __testing.modelsFromConfig({
+    agents: [{ name: "cli", models: ["undeclared", "declared"] }],
+    models: [
+      { id: "undeclared", name: "Undeclared", maxInputTokens: 1000, maxOutputTokens: 100, supportsReasoning: true, reasoning: { effort: "high" } },
+      { id: "declared", name: "Declared", maxInputTokens: 1000, maxOutputTokens: 100, supportsReasoning: true, thinkingLevelMap: { off: null, low: "low" } },
+    ],
+  }, true);
+
+  const undeclared = models.find((model) => model.id === "undeclared");
+  assert.equal(undeclared.thinkingLevelMap.off, null);
+  assert.equal(undeclared.thinkingLevelMap.minimal, "minimal");
+  assert.equal(undeclared.thinkingLevelMap.low, "low");
+  assert.equal(undeclared.thinkingLevelMap.medium, "medium");
+  assert.equal(undeclared.thinkingLevelMap.high, "high");
+  assert.equal(undeclared.thinkingLevelMap.xhigh, "xhigh");
+  assert.equal(undeclared.thinkingLevelMap.max, "max");
+  assert.equal(undeclared.defaultReasoningEffort, "high");
+
+  const declared = models.find((model) => model.id === "declared");
+  assert.equal(declared.thinkingLevelMap.off, null);
+  assert.equal(declared.thinkingLevelMap.low, "low");
+  assert.equal(declared.thinkingLevelMap.minimal, null);
+  assert.equal(declared.thinkingLevelMap.xhigh, null);
+  assert.equal(declared.thinkingLevelMap.max, null);
+});
+
+test("fullThinkingLevels 不覆盖显式的部分 reasoningEfforts 配置", () => {
+  const [partial] = __testing.selectWorkBuddyModels([], [{
+    id: "partial",
+    contextWindow: 1000,
+    maxTokens: 100,
+    reasoningEfforts: { off: null, medium: "balanced" },
+  }], true);
+  assert.equal(partial.thinkingLevelMap.medium, "balanced");
+  assert.equal(partial.thinkingLevelMap.high, null);
+  assert.equal(partial.thinkingLevelMap.max, null);
+
+  const [bare] = __testing.selectWorkBuddyModels([], [{
+    id: "bare",
+    contextWindow: 1000,
+    maxTokens: 100,
+  }], true);
+  assert.equal(bare.reasoning, true);
+  assert.equal(bare.thinkingLevelMap.off, null);
+  assert.equal(bare.thinkingLevelMap.minimal, "minimal");
+  assert.equal(bare.thinkingLevelMap.high, "high");
+  assert.equal(bare.thinkingLevelMap.xhigh, "xhigh");
+  assert.equal(bare.thinkingLevelMap.max, "max");
+});
+
+test("未开启 fullThinkingLevels 时保持原有回退行为", () => {
+  const models = __testing.modelsFromConfig({
+    agents: [{ name: "cli", models: ["undeclared"] }],
+    models: [
+      { id: "undeclared", name: "Undeclared", maxInputTokens: 1000, maxOutputTokens: 100, supportsReasoning: true },
+    ],
+  });
+  assert.equal(models[0].reasoning, true);
+  assert.equal(Object.hasOwn(models[0].thinkingLevelMap, "off"), false);
+  assert.equal(models[0].thinkingLevelMap.xhigh, undefined);
+  assert.equal(models[0].thinkingLevelMap.max, undefined);
+});
+
 test("积分查询复用 WorkBuddy billing 接口并汇总有效资源", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
