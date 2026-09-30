@@ -60,7 +60,7 @@
     }
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-ai": "^0.87.1",
     "pnpm": "11.19.0",
     "yaml": "2.9.0"
   },

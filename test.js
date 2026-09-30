@@ -303,38 +303,33 @@ test("新版模型接口只修改 WorkBuddy 条目并保留认证模式", async 
   assert.equal((await call("POST", { action: "probe" }, { "sec-fetch-site": "cross-site" })).status, 403);
 });
 
-test("WorkBuddy 请求兼容 pi-ai 0.87 折系统提示的 transcript", async () => {
-  // 桌面端运行时（DSH 0.2.x）自带 pi-ai 0.87.1，Models.streamSimple 会先把
-  // systemPrompt/tools 折叠成一条 content 为字符串的 system 消息再交给
-  // provider；本插件自带 0.84.4，期望 { systemPrompt, messages, tools }。
-  // 不适配就会在 buildBaseOptions → estimateMessageTokens 抛
-  // "Cannot read properties of undefined (reading 'length')"。
+test("折叠后的 transcript 原样通过 provider 并完成流式请求", async () => {
+  // DSH 0.2.x 的 Models.streamSimple 会先把 systemPrompt/tools 折叠成一条
+  // content 为字符串的 system 消息再交给 provider api。本插件的 pi-ai（0.87.1）
+  // 原生消费这个形态：estimateMessageTokens 有 system 分支，convertMessages 走
+  // resolveTranscript 从 messages 里重新取系统提示。
+  // 历史上把 pi-ai 钉在 0.84.4 时需要"展开回 { systemPrompt, messages, tools }"
+  // 的 shim，那个 shim 在 0.87.1 上会把系统提示弄丢——这里同时锁住两点：
+  // 折叠形态必须原样到达 api，且必须能跑完流。
   const transcriptContext = {
     messages: [
       { role: "system", content: "你是一个助手。", toolsAdded: [{ name: "probe", description: "探测", parameters: {} }], timestamp: 0 },
       { role: "user", content: "你好", timestamp: 0 },
     ],
   };
-  const context = __testing.workBuddyContext(transcriptContext);
-  assert.equal(context.systemPrompt, "你是一个助手。");
-  assert.equal(context.messages.length, 1);
-  assert.equal(context.messages[0].role, "user");
-  assert.equal(context.tools[0].name, "probe");
 
-  // 旧宿主（0.1.x）传 pi-ai 原生 context，必须原样返回。
-  const native = { systemPrompt: "旧", messages: [{ role: "user", content: "hi", timestamp: 0 }], tools: [] };
-  assert.equal(__testing.workBuddyContext(native), native);
-  assert.deepEqual(__testing.workBuddyContext({ messages: [{ role: "user", content: "hi", timestamp: 0 }] }), { messages: [{ role: "user", content: "hi", timestamp: 0 }] });
-  assert.equal(__testing.workBuddyContext(undefined), undefined);
-
-  // 还原后的 context 必须能让 0.84.4 的 streamSimple 跑通（mock SSE）。
   const previous = globalThis.fetch;
-  globalThis.fetch = async () => new Response([
-    `data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
-    `data: {"id":"1","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}`,
-    `data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
-    "data: [DONE]",
-  ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+  let observedBody;
+  globalThis.fetch = async (_url, init) => {
+    observedBody = JSON.parse(init?.body ?? "{}");
+    return new Response([
+      `data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+      `data: {"id":"1","choices":[{"index":0,"delta":{"reasoning_content":"思考"},"finish_reason":null}]}`,
+      `data: {"id":"1","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}`,
+      `data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`,
+      "data: [DONE]",
+    ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
   try {
     const events = [];
     const model = {
@@ -349,16 +344,30 @@ test("WorkBuddy 请求兼容 pi-ai 0.87 折系统提示的 transcript", async ()
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 200000,
       maxTokens: 48000,
-      compat: { supportsReasoningEffort: true, maxTokensField: "max_tokens", thinkingFormat: "openai" },
+      compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: true, maxTokensField: "max_tokens", thinkingFormat: "openai" },
     };
     for await (const event of __testing.workBuddyApi.streamSimple(model, transcriptContext, { apiKey: "k" })) {
       events.push(event.type);
     }
     assert.equal(events.at(-1), "done");
     assert.ok(events.includes("text_delta"));
+    assert.ok(events.includes("thinking_delta"));
+    // 系统提示必须真的发出去：折叠形态被 api 层重新展开成 leading system 消息，
+    // 而不是被任何 shim 弄丢。
+    assert.equal(observedBody?.messages?.[0]?.role, "system");
+    assert.equal(observedBody?.messages?.[0]?.content, "你是一个助手。");
+    // 折叠进 system 消息的 toolsAdded 也必须被 api 层取回来发给服务端。
+    assert.deepEqual(observedBody?.tools, [{ type: "function", function: { name: "probe", description: "探测", parameters: {} } }]);
   } finally {
     globalThis.fetch = previous;
   }
+});
+
+test("provider api 不再折不折宿主交来的 context", () => {
+  // 防止有人把 0.84.4 时代的展开 shim 加回来：在 0.87.1 上它会让系统提示消失。
+  assert.equal(__testing.workBuddyContext, undefined);
+  const source = readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /function workBuddyContext/);
 });
 
 test("旧版接管 pi-ai，新版保留内置 pi-ai 供自定义 Provider 使用", () => {

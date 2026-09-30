@@ -109,7 +109,7 @@ function traceEvent(trace, stage, details = {}) {
 function observedWorkBuddyStream(model, context, options) {
   const trace = traceContext.getStore();
   const started = Date.now();
-  const stream = openAICompletionsApi.streamSimple(model, workBuddyContext(context), workBuddyRequestOptions(options));
+  const stream = openAICompletionsApi.streamSimple(model, context, workBuddyRequestOptions(options));
   return (async function* () {
     traceEvent(trace, "model.start");
     let first = true;
@@ -136,43 +136,25 @@ function observedWorkBuddyStream(model, context, options) {
 }
 
 /**
- * Restore the context shape the vendored pi-ai 0.84.4 implementation expects.
+ * The provider api receives exactly what the host hands over.
  *
- * DSH 0.2.x ships pi-ai 0.87.1, whose `Models.streamSimple` first folds
- * `Context.systemPrompt` and `Context.tools` into one leading system message
- * with **string** content (`normalizeContext`). This plugin vendors 0.84.4,
- * whose `streamSimple` expects the older `{ systemPrompt, messages, tools }`
- * shape: given the folded transcript it walks a string as if it were a message
- * block array and throws `Cannot read properties of undefined (reading
- * 'length')` inside `estimateMessageTokens`. Older hosts (DSH 0.1.x) pass the
- * native shape, which is returned untouched.
- * @param context - the context the host handed to this provider's api.
- * @returns the same context, or the unfolded `{ systemPrompt, messages, tools }`.
+ * DSH 0.2.x (and this pin of `@earendil-works/pi-ai`) folds
+ * `Context.systemPrompt`/`tools` into a leading string-content system message
+ * before calling the api, and every supported pi-ai release consumes that
+ * shape natively — `resolveTranscript` re-derives the prompt from
+ * `context.messages`. Older 0.1.x hosts pass the unfolded shape, which the
+ * same code path also handles, so no translation belongs here.
+ *
+ * An earlier pin of pi-ai 0.84.4 needed the opposite translation (unfold the
+ * transcript back to `{ systemPrompt, messages, tools }`), because its
+ * `estimateMessageTokens` lacked the system-message branch and threw
+ * `Cannot read properties of undefined (reading 'length')`. Do not reintroduce
+ * that shim while the dependency stays on 0.87.1: it would silently drop the
+ * system prompt instead.
  */
-function workBuddyContext(context) {
-  if (!context || !Array.isArray(context.messages)) return context;
-  const messages = [];
-  let systemPrompt;
-  let tools;
-  for (const message of context.messages) {
-    if (message?.role !== "system" || typeof message.content !== "string") {
-      messages.push(message);
-      continue;
-    }
-    if (message.content) systemPrompt = systemPrompt === undefined ? message.content : `${systemPrompt}\n\n${message.content}`;
-    if (Array.isArray(message.toolsAdded) && message.toolsAdded.length > 0) tools = [...(tools ?? []), ...message.toolsAdded];
-  }
-  if (systemPrompt === undefined && tools === undefined) return context;
-  return {
-    ...(systemPrompt === undefined ? {} : { systemPrompt }),
-    messages,
-    ...(tools === undefined ? {} : { tools }),
-  };
-}
-
 const workBuddyApi = {
   ...openAICompletionsApi,
-  stream: (model, context, options) => openAICompletionsApi.stream(model, workBuddyContext(context), workBuddyRequestOptions(options)),
+  stream: (model, context, options) => openAICompletionsApi.stream(model, context, workBuddyRequestOptions(options)),
   streamSimple: observedWorkBuddyStream,
 };
 
@@ -648,7 +630,7 @@ function installSettingsCompat(ctx, ns, schema, entry, hooks) {
   });
 }
 
-export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyAuth, workBuddyRequestOptions, workBuddySource, workBuddyContext, workBuddyApi, providerSettings, genericProvider, modelsFromConfig, ownsProvider, runtimeHeaders, stripUnsupportedReplay, normalizeWorkBuddyReplay, prepareWorkBuddyOptions, selectWorkBuddyModels, sessionBindingFor, fullThinkingLevelsEnabled });
+export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyAuth, workBuddyRequestOptions, workBuddySource, workBuddyApi, providerSettings, genericProvider, modelsFromConfig, ownsProvider, runtimeHeaders, stripUnsupportedReplay, normalizeWorkBuddyReplay, prepareWorkBuddyOptions, selectWorkBuddyModels, sessionBindingFor, fullThinkingLevelsEnabled });
 
 export function apply(ctx, config) {
   const modernSettings = typeof config?.providers?.get === "function";
