@@ -526,6 +526,110 @@ test("非 WorkBuddy Provider 不会被 replay 兜底改写", () => {
   assert.strictEqual(__testing.normalizeWorkBuddyReplay(options), options);
 });
 
+test("v2 封套（DSH 0.2.x 宿主写入）的 replay 身份同样被归一化", () => {
+  // 0.2.x 宿主写的是嵌套封套：身份在 response 里，签名在顶层 blocks。
+  const replay = {
+    response: {
+      kind: "pi-ai",
+      version: 2,
+      api: "openai-completions",
+      provider: "workbuddy-cn",
+      model: "model",
+      stopReason: "stop",
+    },
+    blocks: [{ type: "reasoning", thinkingSignature: "sig-1" }],
+  };
+  const wrapped = {
+    provider: "modlens-workbuddy-cn",
+    messages: [{
+      role: "assistant",
+      content: [],
+      source: { kind: "model", provider: "modlens-workbuddy-cn", replayState: replay },
+    }],
+  };
+  const normalized = __testing.normalizeWorkBuddyReplay(wrapped);
+  assert.notStrictEqual(normalized, wrapped);
+  assert.equal(normalized.messages[0].source.provider, "workbuddy-cn");
+  assert.equal(normalized.messages[0].source.replayState.response.provider, "workbuddy-cn");
+  // 宿主 readReplayState 会校验这些字段，一个都不能丢。
+  assert.equal(normalized.messages[0].source.replayState.response.kind, "pi-ai");
+  assert.equal(normalized.messages[0].source.replayState.response.version, 2);
+  assert.equal(normalized.messages[0].source.replayState.response.api, "openai-completions");
+  assert.equal(normalized.messages[0].source.replayState.response.model, "model");
+  assert.equal(normalized.messages[0].source.replayState.response.stopReason, "stop");
+  assert.deepEqual(normalized.messages[0].source.replayState.blocks, [{ type: "reasoning", thinkingSignature: "sig-1" }]);
+  // 输入对象不被改写。
+  assert.equal(wrapped.messages[0].source.provider, "modlens-workbuddy-cn");
+  assert.equal(wrapped.messages[0].source.replayState.response.provider, "workbuddy-cn");
+
+  const direct = {
+    provider: "workbuddy-cn",
+    messages: [{
+      role: "assistant",
+      content: [],
+      source: { kind: "model", provider: "workbuddy-cn", replayState: replay },
+    }],
+  };
+  assert.strictEqual(__testing.normalizeWorkBuddyReplay(direct), direct);
+});
+
+test("中断工具错误也移除 v2 封套的 replayState", () => {
+  const replay = {
+    response: {
+      kind: "pi-ai",
+      version: 2,
+      api: "openai-completions",
+      provider: "workbuddy-cn",
+      model: "model",
+      stopReason: "toolUse",
+    },
+    blocks: [{ type: "tool-call" }],
+  };
+  const options = {
+    provider: "workbuddy-cn",
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: "earlier" }], source: { kind: "model", provider: "workbuddy-cn", replayState: { ...replay, response: { ...replay.response, stopReason: "stop" }, blocks: [{ type: "text" }] } } },
+      { role: "assistant", content: [{ type: "tool-call", id: "call-1", name: "pwsh", arguments: "{}" }], source: { kind: "model", provider: "workbuddy-cn", replayState: replay } },
+      { role: "user", content: [{ type: "tool-result", toolCallId: "call-1", isError: true, content: [{ type: "text", text: "unknown outcome" }] }] },
+    ],
+  };
+  // 桌面端宿主有 prepareCall，插件走 legacyReplay=false（只归一化、不剥离）。
+  const normalized = __testing.prepareWorkBuddyOptions(options, false);
+  assert.equal(normalized.messages[0].source.replayState.response.version, 2);
+  assert.equal(normalized.messages[1].source.replayState, undefined);
+  assert.equal(normalized.messages[2].content[0].isError, true);
+});
+
+test("未识别的 replay 封套不做归一化", () => {
+  const unknown = {
+    provider: "workbuddy-cn",
+    messages: [{
+      role: "assistant",
+      content: [],
+      source: {
+        kind: "model",
+        provider: "modlens-workbuddy-cn",
+        replayState: { response: { kind: "pi-ai", version: 3 }, blocks: [] },
+      },
+    }],
+  };
+  assert.strictEqual(__testing.normalizeWorkBuddyReplay(unknown), unknown);
+
+  const foreign = {
+    provider: "workbuddy-cn",
+    messages: [{
+      role: "assistant",
+      content: [],
+      source: {
+        kind: "model",
+        provider: "modlens-workbuddy-cn",
+        replayState: { response: { kind: "anthropic", version: 2 }, blocks: [] },
+      },
+    }],
+  };
+  assert.strictEqual(__testing.normalizeWorkBuddyReplay(foreign), foreign);
+});
+
 test("会话级认证状态只保存账号或 API Key 引用", () => {
   const state = createWorkBuddySessionRoutingState(true, {
     "session-a": { mode: "token", accountId: "user:user-a" },

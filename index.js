@@ -537,10 +537,47 @@ function interruptedToolTailAssistantIndex(messages) {
 }
 
 /**
+ * The replay envelope a durable assistant message carries, in both shapes:
+ * DSH 0.1.x writes a flat `{ kind, version: 1, provider, ... }`, and 0.2.x
+ * writes `{ response: { kind, version: 2, provider, ... }, blocks }`. Returns
+ * undefined for anything this plugin does not own, so callers leave it alone.
+ */
+function replayStateVersion(state) {
+  if (typeof state?.kind === "string" && typeof state?.version === "number") {
+    return state.kind === "pi-ai" && state.version === 1 ? 1 : undefined;
+  }
+  if (typeof state?.response === "object" && state.response !== null) {
+    return state.response.kind === "pi-ai" && state.response.version === 2 ? 2 : undefined;
+  }
+  return undefined;
+}
+
+/** The provider a replay state was produced under, for either envelope shape. */
+function replayStateProvider(state) {
+  if (typeof state?.provider === "string") return state.provider;
+  if (typeof state?.response?.provider === "string") return state.response.provider;
+  return undefined;
+}
+
+/** Rewrite the producing provider while preserving the envelope shape. */
+function withReplayProvider(state, provider) {
+  if (typeof state?.response === "object" && state.response !== null) {
+    return { ...state, response: { ...state.response, provider } };
+  }
+  return { ...state, provider };
+}
+
+/**
  * Make WorkBuddy replay metadata safe across direct and wrapped provider ids.
  * The returned messages are request-only copies; durable session history is
  * never rewritten. An interrupted tool result deliberately loses only the
  * preceding assistant replayState so the model receives ordinary history.
+ *
+ * Canonicalizing matters because the host validates `replayState`'s provider
+ * against the message source and degrades the message to provider-neutral
+ * history (dropping reasoning signatures) on a mismatch — so a conversation
+ * that moves between the direct provider and a wrapper such as ModLens would
+ * otherwise lose native replay fidelity on every turn.
  */
 function normalizeWorkBuddyReplay(options) {
   if (!Array.isArray(options?.messages)) return options;
@@ -551,11 +588,11 @@ function normalizeWorkBuddyReplay(options) {
   const messages = options.messages.map((message, index) => {
     const source = message?.source;
     const state = source?.replayState;
-    if (message?.role !== "assistant" || !source || state?.kind !== "pi-ai" || state?.version !== 1) return message;
+    if (message?.role !== "assistant" || !source || replayStateVersion(state) === undefined) return message;
 
     let nextSource = source;
     const sourceProvider = source.provider;
-    const replayProvider = state.provider;
+    const replayProvider = replayStateProvider(state);
     if (isWorkBuddyProviderName(sourceProvider) && isWorkBuddyProviderName(replayProvider)) {
       const canonical = directWorkBuddyProvider(replayProvider)
         ?? directWorkBuddyProvider(sourceProvider)
@@ -564,7 +601,7 @@ function normalizeWorkBuddyReplay(options) {
         nextSource = {
           ...nextSource,
           provider: canonical,
-          replayState: { ...state, provider: canonical },
+          replayState: withReplayProvider(state, canonical),
         };
       }
     }
