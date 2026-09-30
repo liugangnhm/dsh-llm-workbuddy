@@ -303,6 +303,64 @@ test("新版模型接口只修改 WorkBuddy 条目并保留认证模式", async 
   assert.equal((await call("POST", { action: "probe" }, { "sec-fetch-site": "cross-site" })).status, 403);
 });
 
+test("WorkBuddy 请求兼容 pi-ai 0.87 折系统提示的 transcript", async () => {
+  // 桌面端运行时（DSH 0.2.x）自带 pi-ai 0.87.1，Models.streamSimple 会先把
+  // systemPrompt/tools 折叠成一条 content 为字符串的 system 消息再交给
+  // provider；本插件自带 0.84.4，期望 { systemPrompt, messages, tools }。
+  // 不适配就会在 buildBaseOptions → estimateMessageTokens 抛
+  // "Cannot read properties of undefined (reading 'length')"。
+  const transcriptContext = {
+    messages: [
+      { role: "system", content: "你是一个助手。", toolsAdded: [{ name: "probe", description: "探测", parameters: {} }], timestamp: 0 },
+      { role: "user", content: "你好", timestamp: 0 },
+    ],
+  };
+  const context = __testing.workBuddyContext(transcriptContext);
+  assert.equal(context.systemPrompt, "你是一个助手。");
+  assert.equal(context.messages.length, 1);
+  assert.equal(context.messages[0].role, "user");
+  assert.equal(context.tools[0].name, "probe");
+
+  // 旧宿主（0.1.x）传 pi-ai 原生 context，必须原样返回。
+  const native = { systemPrompt: "旧", messages: [{ role: "user", content: "hi", timestamp: 0 }], tools: [] };
+  assert.equal(__testing.workBuddyContext(native), native);
+  assert.deepEqual(__testing.workBuddyContext({ messages: [{ role: "user", content: "hi", timestamp: 0 }] }), { messages: [{ role: "user", content: "hi", timestamp: 0 }] });
+  assert.equal(__testing.workBuddyContext(undefined), undefined);
+
+  // 还原后的 context 必须能让 0.84.4 的 streamSimple 跑通（mock SSE）。
+  const previous = globalThis.fetch;
+  globalThis.fetch = async () => new Response([
+    `data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+    `data: {"id":"1","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}`,
+    `data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+    "data: [DONE]",
+  ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+  try {
+    const events = [];
+    const model = {
+      id: "glm-5.3-flash",
+      name: "GLM-5.3 Flash",
+      api: "openai-completions",
+      provider: "workbuddy-cn",
+      baseUrl: "https://copilot.tencent.com/v2",
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+      input: ["text", "image"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 48000,
+      compat: { supportsReasoningEffort: true, maxTokensField: "max_tokens", thinkingFormat: "openai" },
+    };
+    for await (const event of __testing.workBuddyApi.streamSimple(model, transcriptContext, { apiKey: "k" })) {
+      events.push(event.type);
+    }
+    assert.equal(events.at(-1), "done");
+    assert.ok(events.includes("text_delta"));
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
 test("旧版接管 pi-ai，新版保留内置 pi-ai 供自定义 Provider 使用", () => {
   const patch = readFileSync(new URL("./cordis.patch.yml", import.meta.url), "utf8");
   const expression = patch.match(/disabled: !!js >-\r?\n((?: {4}[^\r\n]+\r?\n)+)/)?.[1]

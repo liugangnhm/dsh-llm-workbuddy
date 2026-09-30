@@ -109,7 +109,7 @@ function traceEvent(trace, stage, details = {}) {
 function observedWorkBuddyStream(model, context, options) {
   const trace = traceContext.getStore();
   const started = Date.now();
-  const stream = openAICompletionsApi.streamSimple(model, context, workBuddyRequestOptions(options));
+  const stream = openAICompletionsApi.streamSimple(model, workBuddyContext(context), workBuddyRequestOptions(options));
   return (async function* () {
     traceEvent(trace, "model.start");
     let first = true;
@@ -135,9 +135,44 @@ function observedWorkBuddyStream(model, context, options) {
   })();
 }
 
+/**
+ * Restore the context shape the vendored pi-ai 0.84.4 implementation expects.
+ *
+ * DSH 0.2.x ships pi-ai 0.87.1, whose `Models.streamSimple` first folds
+ * `Context.systemPrompt` and `Context.tools` into one leading system message
+ * with **string** content (`normalizeContext`). This plugin vendors 0.84.4,
+ * whose `streamSimple` expects the older `{ systemPrompt, messages, tools }`
+ * shape: given the folded transcript it walks a string as if it were a message
+ * block array and throws `Cannot read properties of undefined (reading
+ * 'length')` inside `estimateMessageTokens`. Older hosts (DSH 0.1.x) pass the
+ * native shape, which is returned untouched.
+ * @param context - the context the host handed to this provider's api.
+ * @returns the same context, or the unfolded `{ systemPrompt, messages, tools }`.
+ */
+function workBuddyContext(context) {
+  if (!context || !Array.isArray(context.messages)) return context;
+  const messages = [];
+  let systemPrompt;
+  let tools;
+  for (const message of context.messages) {
+    if (message?.role !== "system" || typeof message.content !== "string") {
+      messages.push(message);
+      continue;
+    }
+    if (message.content) systemPrompt = systemPrompt === undefined ? message.content : `${systemPrompt}\n\n${message.content}`;
+    if (Array.isArray(message.toolsAdded) && message.toolsAdded.length > 0) tools = [...(tools ?? []), ...message.toolsAdded];
+  }
+  if (systemPrompt === undefined && tools === undefined) return context;
+  return {
+    ...(systemPrompt === undefined ? {} : { systemPrompt }),
+    messages,
+    ...(tools === undefined ? {} : { tools }),
+  };
+}
+
 const workBuddyApi = {
   ...openAICompletionsApi,
-  stream: (model, context, options) => openAICompletionsApi.stream(model, context, workBuddyRequestOptions(options)),
+  stream: (model, context, options) => openAICompletionsApi.stream(model, workBuddyContext(context), workBuddyRequestOptions(options)),
   streamSimple: observedWorkBuddyStream,
 };
 
@@ -613,7 +648,7 @@ function installSettingsCompat(ctx, ns, schema, entry, hooks) {
   });
 }
 
-export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyAuth, workBuddyRequestOptions, workBuddySource, providerSettings, genericProvider, modelsFromConfig, ownsProvider, runtimeHeaders, stripUnsupportedReplay, normalizeWorkBuddyReplay, prepareWorkBuddyOptions, selectWorkBuddyModels, sessionBindingFor, fullThinkingLevelsEnabled });
+export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyAuth, workBuddyRequestOptions, workBuddySource, workBuddyContext, workBuddyApi, providerSettings, genericProvider, modelsFromConfig, ownsProvider, runtimeHeaders, stripUnsupportedReplay, normalizeWorkBuddyReplay, prepareWorkBuddyOptions, selectWorkBuddyModels, sessionBindingFor, fullThinkingLevelsEnabled });
 
 export function apply(ctx, config) {
   const modernSettings = typeof config?.providers?.get === "function";
