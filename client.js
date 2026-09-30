@@ -981,6 +981,9 @@ window.__ModuleLoader__.load({
           message.textContent = error instanceof Error ? error.message : "登录失败";
           message.style.color = "var(--dsw-text-danger, #c62828)";
         } finally {
+          // 请求失败时 render() 不会执行，按钮文案必须在这里复位，
+          // 否则界面会一直停在“切换中…”。
+          tokenButton.textContent = current.mode === "token" ? "令牌模式" : "令牌登录";
           setBusy(false);
         }
       });
@@ -996,6 +999,7 @@ window.__ModuleLoader__.load({
           message.textContent = error instanceof Error ? error.message : "登录失败";
           message.style.color = "var(--dsw-text-danger, #c62828)";
         } finally {
+          addButton.textContent = current.accounts?.length ? "添加账号" : "登录 WorkBuddy";
           setBusy(false);
         }
       });

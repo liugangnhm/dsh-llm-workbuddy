@@ -226,6 +226,30 @@ test("新版 WorkBuddy 卡片保留旧版认证入口并提供模型编辑", () 
   assert.equal(webTesting.validModelOverrides([{ id: "bad", maxTokens: -1 }]), false);
 });
 
+test("本机请求判定兼容桌面端代理转发并拒绝跨站请求", () => {
+  const allowed = (headers, remoteAddress = "127.0.0.1") => webTesting.localPost({ socket: { remoteAddress }, headers });
+
+  // 桌面端主进程转发时剥离了 origin 与 sec-fetch-site，Electron 网络层可能补 none。
+  assert.equal(allowed({}), true);
+  assert.equal(allowed({ "sec-fetch-site": "none" }), true);
+  assert.equal(allowed({ cookie: "session=1" }), true);
+
+  // 浏览器 Web UI 的同源与回环来源照旧放行。
+  assert.equal(allowed({ origin: "http://127.0.0.1:19387", "sec-fetch-site": "same-origin" }), true);
+  assert.equal(allowed({ origin: "http://localhost:3080" }), true);
+  assert.equal(allowed({ "sec-fetch-site": "same-origin" }), true);
+
+  // 跨站浏览器请求、伪造/空来源仍然拒绝。
+  assert.equal(allowed({ origin: "https://evil.example", "sec-fetch-site": "cross-site" }), false);
+  assert.equal(allowed({ origin: "null", "sec-fetch-site": "cross-site" }), false);
+  assert.equal(allowed({ "sec-fetch-site": "cross-site" }), false);
+  assert.equal(allowed({ "sec-fetch-site": "same-site" }), false);
+
+  // 非回环连接一律拒绝，无论头部如何伪装。
+  assert.equal(allowed({}, "10.0.0.5"), false);
+  assert.equal(allowed({ origin: "http://127.0.0.1:19387" }, "10.0.0.5"), false);
+});
+
 test("新版模型接口只修改 WorkBuddy 条目并保留认证模式", async () => {
   const routes = new Map();
   let providers = { "workbuddy-cn": {} };
@@ -248,13 +272,13 @@ test("新版模型接口只修改 WorkBuddy 条目并保留认证模式", async 
     effect: (callback) => callback(),
   }) }, "llm-workbuddy");
   const handler = routes.get("/dsh-llm-workbuddy/auth/models");
-  async function call(method, body) {
+  async function call(method, body, headers = { origin: "http://localhost:3000" }) {
     let response;
     const req = {
       method,
       url: "/dsh-llm-workbuddy/auth/models",
       socket: { remoteAddress: "127.0.0.1" },
-      headers: { origin: "http://localhost:3000" },
+      headers,
       async *[Symbol.asyncIterator]() { if (body) yield Buffer.from(JSON.stringify(body)); },
     };
     await handler(req, {
@@ -269,6 +293,14 @@ test("新版模型接口只修改 WorkBuddy 条目并保留认证模式", async 
   assert.equal(saved.status, 200);
   assert.deepEqual(providers["workbuddy-cn"], { models: [{ id: "glm-5.3" }] });
   assert.equal((await call("POST", { action: "save", models: [{ id: "bad", maxTokens: -1 }] })).status, 400);
+  // 桌面端把渲染进程请求经 dsh-app:// 协议代理转发时会剥掉 origin 与
+  // sec-fetch-site，这种本机请求必须照旧放行到路由逻辑（400 = 未命中动作）。
+  assert.equal((await call("POST", { action: "probe" }, {})).status, 400);
+  assert.equal((await call("POST", { action: "probe" }, { "sec-fetch-site": "none" })).status, 400);
+  // 跨站浏览器请求仍然被拒绝。
+  assert.equal((await call("POST", { action: "probe" }, { origin: "https://evil.example", "sec-fetch-site": "cross-site" })).status, 403);
+  assert.equal((await call("POST", { action: "probe" }, { origin: "null", "sec-fetch-site": "cross-site" })).status, 403);
+  assert.equal((await call("POST", { action: "probe" }, { "sec-fetch-site": "cross-site" })).status, 403);
 });
 
 test("旧版接管 pi-ai，新版保留内置 pi-ai 供自定义 Provider 使用", () => {

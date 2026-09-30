@@ -47,14 +47,39 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+const LOOPBACK_HOSTNAMES = ["127.0.0.1", "localhost", "[::1]"];
+const DESKTOP_APP_ORIGIN = "dsh-app://app";
+const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+/**
+ * Whether a state-changing plugin route may run for this request.
+ *
+ * These routes mint credentials, so they must not be reachable by a page the
+ * user happens to have open: a cross-site request is refused unless it came
+ * from the loopback Web UI. Two clients reach them.
+ *
+ * The browser UI sends `Origin` (same-origin form posts may send only
+ * `Sec-Fetch-Site: same-origin`), which must name a loopback host. The desktop
+ * shell loads its renderer from the privileged `dsh-app://app` origin and
+ * proxies every request through its own main process, which **deletes**
+ * `origin` and `sec-fetch-site` before forwarding — so those requests arrive
+ * bare from a loopback socket and are accepted on that basis.
+ *
+ * Accepting a bare request is not a hole: browsers do not let scripts set
+ * `Origin` or `Sec-Fetch-Site`, and a cross-site request always carries
+ * `Sec-Fetch-Site: cross-site` plus a non-loopback `Origin`, both refused
+ * below. Only a local, non-page client can produce a request with neither.
+ */
 function localPost(req) {
-  const address = req.socket.remoteAddress;
-  const loopback = address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
-  if (!loopback) return false;
+  if (!LOOPBACK_ADDRESSES.has(req.socket.remoteAddress)) return false;
   const origin = req.headers.origin;
-  if (!origin) return req.headers["sec-fetch-site"] === "same-origin";
+  if (!origin) {
+    const site = req.headers["sec-fetch-site"];
+    return site === undefined || site === "none" || site === "same-origin";
+  }
+  if (origin === DESKTOP_APP_ORIGIN) return true;
   try {
-    return ["127.0.0.1", "localhost", "[::1]"].includes(new URL(origin).hostname);
+    return LOOPBACK_HOSTNAMES.includes(new URL(origin).hostname);
   } catch {
     return false;
   }
@@ -134,7 +159,7 @@ function validModelOverrides(models) {
   return true;
 }
 
-export const __testing = Object.freeze({ settingsAccess, setMode, validModelOverrides });
+export const __testing = Object.freeze({ settingsAccess, setMode, validModelOverrides, localPost });
 
 function maskApiKey(value) {
   const text = typeof value === "string" ? value : "";
