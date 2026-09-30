@@ -743,6 +743,15 @@ test("未开启 fullThinkingLevels 时保持原有回退行为", () => {
   assert.equal(models[0].thinkingLevelMap.max, undefined);
 });
 
+test("完整思考档位默认开启，可显式关闭", () => {
+  // 默认开启：桌面端与 Web 端共用同一份代码，无需任何配置。
+  assert.equal(__testing.fullThinkingLevelsEnabled(undefined), true);
+  assert.equal(__testing.fullThinkingLevelsEnabled({}), true);
+  assert.equal(__testing.fullThinkingLevelsEnabled({ fullThinkingLevels: true }), true);
+  // 显式关闭恢复到保守目录。
+  assert.equal(__testing.fullThinkingLevelsEnabled({ fullThinkingLevels: false }), false);
+});
+
 test("积分查询复用 WorkBuddy billing 接口并汇总有效资源", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];

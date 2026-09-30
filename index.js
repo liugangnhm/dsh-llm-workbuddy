@@ -424,6 +424,20 @@ function selectBuiltinModels(base, entries) {
   return { ...base, getModels: () => selected };
 }
 
+/**
+ * Whether a provider exposes the full pi-ai thinking-level set.
+ *
+ * This fork enables it by default: WorkBuddy rarely declares a per-model
+ * `thinkingLevelMap`, and without that declaration pi-ai offers only
+ * `minimal`…`high`. Setting `fullThinkingLevels: false` on the provider
+ * restores the conservative catalog, and a per-model `reasoningEfforts`
+ * entry still decides that one model; a remote declaration always wins
+ * verbatim either way.
+ */
+function fullThinkingLevelsEnabled(source) {
+  return source?.fullThinkingLevels !== false;
+}
+
 function selectWorkBuddyModels(base, entries, expandLevels = false) {
   if (!Array.isArray(entries) || entries.length === 0) return base;
   const byId = new Map(base.map((model) => [model.id, model]));
@@ -599,7 +613,7 @@ function installSettingsCompat(ctx, ns, schema, entry, hooks) {
   });
 }
 
-export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyAuth, workBuddyRequestOptions, workBuddySource, providerSettings, genericProvider, modelsFromConfig, ownsProvider, runtimeHeaders, stripUnsupportedReplay, normalizeWorkBuddyReplay, prepareWorkBuddyOptions, selectWorkBuddyModels, sessionBindingFor });
+export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyAuth, workBuddyRequestOptions, workBuddySource, providerSettings, genericProvider, modelsFromConfig, ownsProvider, runtimeHeaders, stripUnsupportedReplay, normalizeWorkBuddyReplay, prepareWorkBuddyOptions, selectWorkBuddyModels, sessionBindingFor, fullThinkingLevelsEnabled });
 
 export function apply(ctx, config) {
   const modernSettings = typeof config?.providers?.get === "function";
@@ -640,11 +654,7 @@ export function apply(ctx, config) {
       if (!ownsProvider(provider, builtins, source)) continue;
       if (WORKBUDDY_PROVIDERS.has(provider)) {
         const sourceWithAuth = workBuddySource(current(), source);
-        // `fullThinkingLevels` opts every WorkBuddy model of this provider
-        // into the complete pi-ai level set (off…max) when neither the remote
-        // catalog nor a per-model `reasoningEfforts` entry declares levels.
-        // Explicit declarations still win verbatim.
-        const expandLevels = source.fullThinkingLevels === true;
+        const expandLevels = fullThinkingLevelsEnabled(source);
         const models = selectWorkBuddyModels(remoteModels ?? FALLBACK_MODELS, source.models, expandLevels);
         const configured = new Map((source.models ?? []).flatMap((model) =>
           Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
@@ -870,7 +880,7 @@ export function apply(ctx, config) {
     let pending = refreshPromises.get(cacheKey);
     if (!pending) {
       pending = (async () => {
-        remoteModels = await fetchWorkBuddyModels(credential, signal, profile?.fullThinkingLevels === true);
+        remoteModels = await fetchWorkBuddyModels(credential, signal, fullThinkingLevelsEnabled(profile));
         remoteModelsKey = cacheKey;
         generation += 1;
       })().finally(() => refreshPromises.delete(cacheKey));
@@ -977,7 +987,7 @@ export function apply(ctx, config) {
       const credential = request.apiKey
         ? { value: request.apiKey, kind: "api-key", ref: API_KEY_ENV }
         : await resolveCredential(request.provider, profile);
-      remoteModels = await fetchWorkBuddyModels(credential, discoverySignal, profile?.fullThinkingLevels === true);
+      remoteModels = await fetchWorkBuddyModels(credential, discoverySignal, fullThinkingLevelsEnabled(profile));
       remoteModelsKey = credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? API_KEY_ENV}`;
       generation += 1;
       return remoteModels.map((model) => ({

@@ -202,6 +202,28 @@ off / minimal / low / medium / high / xhigh / max
 实际选项可能因模型不同而不同。未手动指定时，使用 WorkBuddy 返回的默认档位；服务端
 没有声明思考能力时，插件不会额外发送思考参数。
 
+### 本分支的差异：完整思考档位默认开启
+
+上游版本里，只有在线目录显式声明了 `thinkingLevelMap` 的模型才会出现 `xhigh` 和
+`max`（pi-ai 对这两档是 opt-in），而 WorkBuddy 很少声明，因此多数模型只有
+`minimal` ~ `high` 四档。本分支改为**默认展开完整档位**：
+
+- 在线目录声明了 `thinkingLevelMap` 的模型：仍严格按服务端声明提供档位；
+- 未声明的模型：提供 `off / minimal / low / medium / high / xhigh / max` 全部档位；
+- 单个模型可用 `reasoningEfforts` 覆盖自己的档位；
+- 整个 Provider 可用 `fullThinkingLevels: false` 恢复上游的保守行为：
+
+```yaml
+- id: llm-workbuddy
+  config:
+    providers:
+      workbuddy-cn:
+        fullThinkingLevels: false
+```
+
+注意：展开档位后会向服务端发送对应档位名（如 `reasoning_effort: "xhigh"`）。如果某个
+模型实际不支持该档位，服务端会返回错误，而不是被静默替换成相邻档位。
+
 ## 认证和请求说明
 
 - API Key 请求使用 WorkBuddy 的 OpenAI-compatible 接口；
