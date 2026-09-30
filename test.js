@@ -315,6 +315,17 @@ test("旧版接管 pi-ai，新版保留内置 pi-ai 供自定义 Provider 使用
   assert.equal(disabled(ctx, host("0.1.7-rc.1")), false);
   assert.equal(disabled(ctx, host("0.1.8")), false);
   assert.equal(disabled({ get: () => undefined }, host("0.1.8")), true);
+  // 0.2.x 与更高版本属于 next 架构，必须保留内置 llm-pi-ai，否则用户的其他
+  // Provider 失去适配器：添加按钮变灰、已配置的模型从选择器里消失。
+  assert.equal(disabled(ctx, host("0.2.0-rc.2")), false);
+  assert.equal(disabled(ctx, host("0.2.0")), false);
+  assert.equal(disabled(ctx, host("0.2.1")), false);
+  assert.equal(disabled(ctx, host("1.0.0")), false);
+  assert.equal(disabled(ctx, host("0.1.0")), true);
+  assert.equal(disabled(ctx, host("0.1")), true);
+  // 版本无法解析时保守起见不再接管，避免误伤自定义 Provider。
+  assert.equal(disabled(ctx, host("")), false);
+  assert.equal(disabled(ctx, host("weird")), false);
 });
 
 test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", () => {

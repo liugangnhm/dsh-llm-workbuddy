@@ -1,9 +1,18 @@
 - id: llm-pi-ai
   disabled: !!js >-
-    !ctx.get('profileContext')?.installAnchor ||
-    Number(JSON.parse(process.getBuiltinModule('fs').readFileSync(
-    ctx.get('profileContext').installAnchor, 'utf8')).version
-    .match(/^0\.1\.(\d+)/)?.[1] ?? 0) < 7
+    (() => {
+      const anchor = ctx.get('profileContext')?.installAnchor;
+      if (!anchor) return true;
+      try {
+        const version = JSON.parse(
+          process.getBuiltinModule('fs').readFileSync(anchor, 'utf8')).version;
+        const parsed = /^(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(version ?? ''));
+        if (!parsed) return false;
+        return Number(parsed[1]) === 0 && Number(parsed[2]) === 1 && Number(parsed[3] ?? 0) < 7;
+      } catch {
+        return false;
+      }
+    })()
 
 - insert:
     - id: llm-workbuddy

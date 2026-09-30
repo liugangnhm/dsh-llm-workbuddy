@@ -72,9 +72,9 @@ function usesEntrySettings() {
     env: dshEnv(),
   });
   if (result.error || result.status !== 0) throw new Error("无法检测 DSH 版本，请确认 dsh 命令可用");
-  const version = String(result.stdout).match(/\b0\.1\.(\d+)(?:[-.]|\b)/);
+  const version = String(result.stdout).match(/(\d+)\.(\d+)(?:\.(\d+))?/);
   if (!version) throw new Error("无法识别 DSH 版本，令牌已保存；请在模型设置中手动选择令牌登录");
-  return Number(version[1]) >= 7;
+  return !(Number(version[1]) === 0 && Number(version[2]) === 1 && Number(version[3] ?? 0) < 7);
 }
 
 function writeYamlDocument(file, document) {
